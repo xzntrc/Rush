@@ -1,44 +1,70 @@
 use std::{
     io,
     io::Read,
-    process::{Command, Stdio},
+    process::{
+        Command as StdCommand,
+        Stdio,
+        ChildStdout
+    },
 };
 
-struct CommandObject<'a> {
-    name: &'a str,
+enum CommandType<'a> {
+    ShellCommand(ShellCommand),
+    SystemCommand(&'a str)
+}
+
+enum ShellCommand {
+    cd,
+    ls
+}
+
+struct Command<'a> {
+    kind: CommandType<'a>,
     args: Vec<&'a str>
 }
 
-impl<'a> CommandObject<'a> {
+impl<'a> Command<'a> {
     fn parse(string: &'a str) -> Self {
         let mut split = string.split_whitespace();
-        let name = split.next().unwrap();
+        let kind = CommandType::SystemCommand(split.next().unwrap());
         let args: Vec<&str> = split.collect();
 
         Self {
-            name,
+            kind,
             args
         }
     }
-}
 
-fn pipe_commands<'a, I>(commands: I)
-where
-    I: Iterator<Item = CommandObject<'a>>
-{
-    let out = commands.fold(None, |mut out, command| {
-        let cmd = Command::new(command.name)
-            .args(command.args)
-            .stdin(out.take().map(Into::into).unwrap_or_else(Stdio::piped))
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("Failed to execute command");
-        cmd.stdout
-    });
+    fn execute(&self, out: &mut Option<ChildStdout>) -> Option<ChildStdout> {
+        match &self.kind {
+            CommandType::SystemCommand(cmd) => {
+                let std_cmd = StdCommand::new(cmd)
+                    .args(&self.args)
+                    .stdin(out.take().map(Into::into).unwrap_or_else(Stdio::piped))
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .expect("Failed to execute command");
+                std_cmd.stdout
+            }
+            CommandType::ShellCommand(cmd) => {
+                todo!();
+            }
+            _ => None
+        }
+    }
 
-    let mut s = String::new();
-    out.unwrap().read_to_string(&mut s).unwrap();
-    println!("{}", s);
+    fn pipe_commands<I>(commands: I)
+    where
+        I: Iterator<Item = Command<'a>>
+    {
+        let out = commands.fold(None, |mut out, command| {
+            command.execute(&mut out)
+        });
+
+        let mut s = String::new();
+        out.unwrap().read_to_string(&mut s).unwrap();
+        println!("{}", s);
+    }
 }
 
 fn main() {
@@ -50,8 +76,8 @@ fn main() {
 
         // TODO: Work on parsing pipes better and handling edge cases...
         let commands = buffer.split("|")
-            .map(|s| CommandObject::parse(s));
+            .map(|s| Command::parse(s));
         
-        pipe_commands(commands);
+        Command::pipe_commands(commands);
     }
 }
