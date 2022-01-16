@@ -1,5 +1,5 @@
 use std::{
-    env::{self, args_os},
+    env,
     io,
     path::Path,
     process::{
@@ -9,47 +9,75 @@ use std::{
     }
 };
 
+use clap::Parser;
+
 enum CommandType<'a> {
     ShellCommand(ShellCommand),
     SystemCommand(&'a str)
 }
 
 impl<'a> CommandType<'a> {
-    fn parse(program: &'a str) -> CommandType {
+    fn parse(program: &str) -> CommandType {
         match program {
-            "echo" => CommandType::ShellCommand(ShellCommand::echo),
-            "cd" => CommandType::ShellCommand(ShellCommand::cd),
-            "exit" => CommandType::ShellCommand(ShellCommand::exit),
+            "echo" => CommandType::ShellCommand(ShellCommand::Echo),
+            "cd" => CommandType::ShellCommand(ShellCommand::Cd),
+            "exit" => CommandType::ShellCommand(ShellCommand::Exit),
             _ => CommandType::SystemCommand(program)
         }
     }
 }
 
 #[derive(PartialEq)]
-enum ShellCommand {
-    echo,
-    cd,
-    exit
+enum ShellCommand
+{
+    Echo,
+    Cd,
+    Exit
 }
 
-impl ShellCommand {
+impl ShellCommand
+{
+    fn execute<'a, I>(&self, mut args: I)
+    where
+        I: Iterator<Item = &'a str>
+    {
+        match self {
+            ShellCommand::Echo => {
+                println!("{}", args.collect::<Vec<&str>>().concat());
+            }
+            ShellCommand::Cd => {
+                let new_dir = args.next().unwrap();
+                let root = Path::new(new_dir);
+    
+                match env::set_current_dir(&root) {
+                    Ok(_) => println!("Changed directory to {}", root.display()),
+                    Err(e) => eprintln!("{}", e)
+                }
+            }
+            _ => return
+        }
+    }
+
     fn to_string<'a>(&self) -> &'a str {
         match &self {
-            ShellCommand::echo => "echo",
-            ShellCommand::cd => "cd",
-            ShellCommand::exit => "exit"
+            ShellCommand::Echo => "echo",
+            ShellCommand::Cd => "cd",
+            ShellCommand::Exit => "exit"
         }
     }
 }
 
-struct Command<'a, I: Iterator<Item = &'a str>> {
+struct Command<'a>
+{
     kind: CommandType<'a>,
-    args: I
+    args: Box<dyn Iterator<Item = &'a str> + 'a>
 }
 
-impl<'a, I: Iterator<Item = &'a str>> Command<'a, I> {
-    fn parse(mut args: I) -> Option<Self>
-    {
+impl<'a> Command<'a>
+{
+    fn parse(
+        mut args: Box<dyn Iterator<Item = &'a str> + 'a>
+    ) -> Option<Self> {
         let kind = CommandType::parse(args.next()?);
 
         Some(Self {
@@ -58,10 +86,15 @@ impl<'a, I: Iterator<Item = &'a str>> Command<'a, I> {
         })
     }
 
-    fn pipe_commands<C>(commands: C)
-    where
-        C: Iterator<Item = Command<'a, I>>
-    {
+    fn parse_pipes(args: &'a str) -> impl Iterator<Item = Command<'a>> {
+        args.split("|").map(|s| {
+            Command::parse(Box::new(s.split_whitespace())).unwrap()
+        })
+    }
+
+    fn pipe_commands(
+        commands: impl Iterator<Item = Command<'a>>
+    ) {
         let mut peekable = commands.peekable();
         let mut previous = None;
         while let Some(command) = peekable.next() {
@@ -84,12 +117,20 @@ impl<'a, I: Iterator<Item = &'a str>> Command<'a, I> {
 
         match self.kind {
             CommandType::ShellCommand(program) => {
-                if program == ShellCommand::exit {
+                if program == ShellCommand::Exit {
                     std::process::exit(0);
                 }
+                
+                let a: &str = program.to_string();
+                let b = self.args.collect::<Vec<&str>>().concat();
+                let command = format!("{} {}", a, b.as_str());
+                let args = [
+                    "-c",
+                    command.as_str()
+                ];
 
                 StdCommand::new(std::env::current_exe().unwrap())
-                    .args(["-c", program.to_string()].into_iter().chain(self.args))
+                    .args(args)
                     .stdin(stdin)
                     .stdout(stdout)
                     .spawn()
@@ -107,48 +148,31 @@ impl<'a, I: Iterator<Item = &'a str>> Command<'a, I> {
     }
 }
 
-fn main() {
-    let mut args = env::args().skip(1);
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    #[clap(short)]
+    command: Option<String>
+}
 
-    if let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-c" => {
-                if let CommandType::ShellCommand(cmd) = CommandType::parse(args.next().unwrap().as_str()) {
-                    match cmd {
-                        ShellCommand::echo => {
-                            println!("{}", args.collect::<Vec<String>>().concat());
-                        }
-                        ShellCommand::cd => {
-                            let new_dir = args.next().take().unwrap();
-                            let root = Path::new(new_dir.as_str());
-                
-                            if let Err(e) = env::set_current_dir(&root) {
-                                eprintln!("{}", e);
-                            } else {
-                                println!("Changed directory to {}", root.display());
-                            }
-                        }
-                        _ => return
-                    }
-                } else {
-                    eprintln!("Invalid command/arguments.");
-                }
-            }
-            _ => eprintln!("Invalid arguments.")
+fn main() {
+    let args = Cli::parse();
+
+    if let Some(command) = args.command {
+        let mut command_args = command.split_whitespace();
+
+        if let CommandType::ShellCommand(cmd) = CommandType::parse(command_args.next().unwrap()) {
+            cmd.execute(command_args);
+        } else {
+            eprintln!("Invalid command/arguments.");
         }
     } else {
         loop {
             let mut buffer = String::new();
             io::stdin().read_line(&mut buffer).unwrap();
             
-            // TODO: Work on parsing pipes better and handling edge cases...
-            let commands = buffer.split("|")
-                .map(|s| {
-                    Command::parse(s.split_whitespace()).unwrap()
-                })
-                .peekable();
-
-            Command::pipe_commands(commands);
+            let parsed = Command::parse_pipes(buffer.as_str());
+            Command::pipe_commands(parsed);
         }
     }
 }
