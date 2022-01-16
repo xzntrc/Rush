@@ -1,9 +1,7 @@
 use std::{
-    env,
+    env::{self, args_os},
     io,
-    io::Read,
     path::Path,
-    fs,
     process::{
         Command as StdCommand,
         Stdio,
@@ -16,92 +14,141 @@ enum CommandType<'a> {
     SystemCommand(&'a str)
 }
 
+impl<'a> CommandType<'a> {
+    fn parse(program: &'a str) -> CommandType {
+        match program {
+            "echo" => CommandType::ShellCommand(ShellCommand::echo),
+            "cd" => CommandType::ShellCommand(ShellCommand::cd),
+            "exit" => CommandType::ShellCommand(ShellCommand::exit),
+            _ => CommandType::SystemCommand(program)
+        }
+    }
+}
+
+#[derive(PartialEq)]
 enum ShellCommand {
+    echo,
     cd,
-    ls
+    exit
 }
 
-struct Command<'a> {
+impl ShellCommand {
+    fn to_string<'a>(&self) -> &'a str {
+        match &self {
+            ShellCommand::echo => "echo",
+            ShellCommand::cd => "cd",
+            ShellCommand::exit => "exit"
+        }
+    }
+}
+
+struct Command<'a, I: Iterator<Item = &'a str>> {
     kind: CommandType<'a>,
-    args: Vec<&'a str>
+    args: I
 }
 
-impl<'a> Command<'a> {
-    fn parse(string: &'a str) -> Self {
-        let mut split = string.split_whitespace();
-        let kind = CommandType::SystemCommand(split.next().unwrap());
-        let args: Vec<&str> = split.collect();
+impl<'a, I: Iterator<Item = &'a str>> Command<'a, I> {
+    fn parse(mut args: I) -> Option<Self>
+    {
+        let kind = CommandType::parse(args.next()?);
 
-        Self {
+        Some(Self {
             kind,
             args
+        })
+    }
+
+    fn pipe_commands<C>(commands: C)
+    where
+        C: Iterator<Item = Command<'a, I>>
+    {
+        let mut peekable = commands.peekable();
+        let mut previous = None;
+        while let Some(command) = peekable.next() {
+            previous = Some(command.execute(previous, peekable.peek().is_some()));
         }
     }
 
-    fn execute(&self, previous: Option<Child>, has_next: bool) -> Option<Child> {
-        match &self.kind {
-            CommandType::SystemCommand(cmd) => {
-                let stdin = previous
-                    .map_or(
-                        Stdio::inherit(),
-                        |output: Child| Stdio::from(output.stdout.unwrap())
-                    );
+    fn execute(self, previous: Option<Child>, has_next: bool) -> Child {
+        let stdin = previous
+            .map_or(
+                Stdio::inherit(),
+                |output: Child| Stdio::from(output.stdout.unwrap())
+            );
                 
-                let stdout = if has_next {
-                    Stdio::piped()
-                } else {
-                    Stdio::inherit()
-                };
+        let stdout = if has_next {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        };
 
-                let output = StdCommand::new(cmd)
-                    .args(&self.args)
+        match self.kind {
+            CommandType::ShellCommand(program) => {
+                if program == ShellCommand::exit {
+                    std::process::exit(0);
+                }
+
+                StdCommand::new(std::env::current_exe().unwrap())
+                    .args(["-c", program.to_string()].into_iter().chain(self.args))
                     .stdin(stdin)
                     .stdout(stdout)
                     .spawn()
-                    .expect("Failed to execute command");
-                
-                Some(output)
+                    .expect("Failed to execute command")
             }
-            CommandType::ShellCommand(cmd) => {
-                match cmd {
-                    ShellCommand::cd => {
-                        let new_dir = self.args[0];
-
-                        let root = Path::new(new_dir);
-                        if let Err(e) = env::set_current_dir(&root) {
-                            eprintln!("{}", e);
-                        } else {
-                            println!("Changed directory to {}", root.display());
-                        }
-                    }
-                    ShellCommand::ls => {
-                        let paths = fs::read_dir(env::current_dir().unwrap()).unwrap();
-                        
-                        for path in paths {
-                            println!("{}", path.unwrap().file_name().to_str().unwrap());
-                        }
-                    }
-                }
-
-                None
+            CommandType::SystemCommand(program) => {
+                StdCommand::new(program)
+                    .args(self.args)
+                    .stdin(stdin)
+                    .stdout(stdout)
+                    .spawn()
+                    .expect("Failed to execute command")
             }
         }
     }
 }
 
 fn main() {
-    loop {
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer).unwrap();
+    let mut args = env::args().skip(1);
 
-        // TODO: Work on parsing pipes better and handling edge cases...
-        let mut commands = buffer.split("|")
-            .map(|s| Command::parse(s))
-            .peekable();
-        
-        let mut previous = None;
-        while let Some(command) = commands.next() {
-            previous = command.execute(previous, commands.peek().is_some());
+    if let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-c" => {
+                if let CommandType::ShellCommand(cmd) = CommandType::parse(args.next().unwrap().as_str()) {
+                    match cmd {
+                        ShellCommand::echo => {
+                            println!("{}", args.collect::<Vec<String>>().concat());
+                        }
+                        ShellCommand::cd => {
+                            let new_dir = args.next().take().unwrap();
+                            let root = Path::new(new_dir.as_str());
+                
+                            if let Err(e) = env::set_current_dir(&root) {
+                                eprintln!("{}", e);
+                            } else {
+                                println!("Changed directory to {}", root.display());
+                            }
+                        }
+                        _ => return
+                    }
+                } else {
+                    eprintln!("Invalid command/arguments.");
+                }
+            }
+            _ => eprintln!("Invalid arguments.")
+        }
+    } else {
+        loop {
+            let mut buffer = String::new();
+            io::stdin().read_line(&mut buffer).unwrap();
+            
+            // TODO: Work on parsing pipes better and handling edge cases...
+            let commands = buffer.split("|")
+                .map(|s| {
+                    Command::parse(s.split_whitespace()).unwrap()
+                })
+                .peekable();
+
+            Command::pipe_commands(commands);
         }
     }
 }
