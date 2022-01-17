@@ -25,8 +25,7 @@ impl<'a> CommandType<'a> {
 }
 
 #[derive(PartialEq)]
-pub enum ShellCommand
-{
+pub enum ShellCommand {
     Echo,
     Cd,
     Exit
@@ -54,13 +53,17 @@ impl ShellCommand
             _ => return
         }
     }
+}
 
-    pub fn to_string<'a>(&self) -> &'a str {
-        match &self {
+impl ToString for ShellCommand {
+    fn to_string(&self) -> String {
+        let string = match &self {
             ShellCommand::Echo => "echo",
             ShellCommand::Cd => "cd",
             ShellCommand::Exit => "exit"
-        }
+        };
+
+        String::from(string)
     }
 }
 
@@ -74,18 +77,18 @@ impl<'a> Command<'a>
 {
     pub fn parse(
         mut args: Box<dyn Iterator<Item = &'a str> + 'a>
-    ) -> Option<Self> {
-        let kind = CommandType::parse(args.next()?);
+    ) -> Self {
+        let kind = CommandType::parse(args.next().unwrap());
 
-        Some(Self {
+        Self {
             kind,
             args
-        })
+        }
     }
 
     pub fn parse_pipes(args: &'a str) -> impl Iterator<Item = Command<'a>> {
         args.split("|").map(|s| {
-            Command::parse(Box::new(s.split_whitespace())).unwrap()
+            Command::parse(Box::new(s.split_whitespace()))
         })
     }
 
@@ -113,21 +116,21 @@ impl<'a> Command<'a>
         };
 
         match self.kind {
-            CommandType::ShellCommand(program) => {
-                if program == ShellCommand::Exit {
+            CommandType::ShellCommand(shell_cmd) => {
+                if shell_cmd == ShellCommand::Exit {
                     std::process::exit(0);
                 }
                 
-                let a: &str = program.to_string();
-                let b = self.args.collect::<Vec<&str>>().concat();
-                let command = format!("{} {}", a, b.as_str());
-                let args = [
+                let program = shell_cmd.to_string();
+                let args = self.args.collect::<Vec<&str>>().concat();
+                let command = format!("{} {}", program.as_str(), args.as_str());
+                let std_args = [
                     "-c",
                     command.as_str()
                 ];
 
                 StdCommand::new(std::env::current_exe().unwrap())
-                    .args(args)
+                    .args(std_args)
                     .stdin(stdin)
                     .stdout(stdout)
                     .spawn()

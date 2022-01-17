@@ -16,10 +16,14 @@ fn main() {
     if let Some(command) = args.command {
         let mut command_args = command.split_whitespace();
 
-        if let CommandType::ShellCommand(cmd) = CommandType::parse(command_args.next().unwrap()) {
-            cmd.execute(command_args);
-        } else {
-            eprintln!("Invalid command/arguments.");
+        match CommandType::parse(command_args.next().unwrap()) {
+            CommandType::ShellCommand(cmd) => {
+                cmd.execute(command_args);
+            }
+            CommandType::SystemCommand(cmd) => {
+                Command::parse(Box::new([cmd].into_iter()))
+                    .execute(None, false);
+            }
         }
     } else {
         loop {
